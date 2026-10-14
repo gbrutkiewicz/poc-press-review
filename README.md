@@ -49,7 +49,26 @@ curl -X POST http://localhost:3000/api/validations/save \
 ```
 
 Sans serveur : `npm run scan` scanne `data/input/` et affiche un résumé.
-Tests : `npm test` (15 tests : tagging unitaire + bout en bout sur les 3 samples).
+Tests : `npm test` (25 tests : tagging unitaire, bout en bout sur les 3 samples, onglet « Validés »).
+
+### Consulter les documents validés
+
+L'interface a trois onglets :
+
+| Onglet | Adresse | Contenu |
+|---|---|---|
+| **À valider** | `#/a-valider` | Documents en attente, tags proposés pré-cochés, bouton ✅ Valider |
+| **Validés** | `#/valides` | Liste paginée (25/page), dernière validation d'abord : id copiable, tags validés, validateur, date. Recherche (nom, texte, notes), filtres par tag, validateur et période, export CSV de la sélection |
+| **Erreurs** | `#/erreurs` | Visible seulement s'il y a des échecs d'extraction ; bouton « Rescanner » |
+
+Un clic sur un document ouvre sa **fiche** (`#/documents/{id}`, lien direct qui survit au rafraîchissement) :
+- **Informations** : type, taille, pages, chemin d'origine, SHA-256, dates, métadonnées, OCR, avertissements.
+- **Tags** : comparaison proposition automatique ↔ validation (✔ conservé, ➕ ajouté, ➖ retiré), scores et mots-clés déclencheurs ; un clic sur un tag cherche son mot-clé dans le texte.
+- **Validation** : validateur, date, notes, historique complet ; bouton **Remettre en attente** (nom + motif obligatoires, rien n'est supprimé).
+- **Texte extrait** : séparateurs de page, recherche sans accents avec surlignage, copie, téléchargement `.txt`.
+- **Images** : vignettes, visionneuse plein écran (← → Échap), téléchargement.
+
+Pour tester la liste avec du volume : `npm run seed -- 50` (ou `10000`) crée des documents validés fictifs préfixés `seed-` ; `npm run seed -- --clean` les supprime.
 
 ### Vos propres documents
 
@@ -95,14 +114,17 @@ Le contenu de `data/` (documents, images extraites, base SQLite) est **exclu de 
 | `POST` | `/api/scan/input` | Scanne tout `data/input` (fichiers déjà vus ignorés sauf `force: true`) |
 | `GET` | `/api/validations/pending` | Documents en attente, plus récents d'abord |
 | `POST` | `/api/validations/save` | `{ documentId, tags, validatedBy, notes }` → marque `validated` |
+| `GET` | `/api/validated` | Documents validés, paginés et filtrés : `limit` (1–100, défaut 25), `offset`, `q`, `category` + `tag`, `validatedBy`, `from`, `to` (AAAA-MM-JJ). Réponse `{ total, items, validators }` |
+| `POST` | `/api/documents/:id/reopen` | `{ by, reason }` → remet un document validé en attente (409 sinon) |
+| `GET` | `/api/documents/:id/text` | Texte extrait en `.txt` |
 | `GET` | `/api/documents?status=` | Liste (pending / validated / error) |
-| `GET` | `/api/documents/:id` | Document complet (texte, métadonnées, tags, images, dernière validation) |
-| `GET` | `/api/documents/:id/images/:imageId` | Image extraite |
-| `GET` | `/api/export?format=csv\|json` | Export des validations |
+| `GET` | `/api/documents/:id` | Document complet : texte, métadonnées, tags, images, dernière validation, `validations` (historique), `tagDiff` |
+| `GET` | `/api/documents/:id/images/:imageId` | Image extraite ; `?size=thumb` → vignette 320 px (mise en cache dans `thumbs/`), `?download=1` → téléchargement |
+| `GET` | `/api/export?format=csv\|json` | Export des validations ; accepte les mêmes filtres que `/api/validated` |
 | `GET` | `/api/config/tags` | Listes fermées et seuil |
 | `GET` | `/api/health` | État, compteurs, disponibilité d'Ollama |
 
-Codes d'erreur : `400 BAD_REQUEST / BAD_JSON`, `403 PATH_NOT_ALLOWED`, `404 FILE_NOT_FOUND`, `413 FILE_TOO_LARGE`, `415 UNSUPPORTED_FORMAT`, `422 CORRUPTED_FILE / EMPTY_FILE`, `500 EXTRACTION_FAILED`. Un échec d'extraction est aussi enregistré en base (`status = 'error'`).
+Les identifiants (`:id`, `:imageId`) doivent être des UUID (`400 BAD_ID` sinon). Codes d'erreur : `400 BAD_REQUEST / BAD_JSON / BAD_QUERY / BAD_TAGS`, `409 NOT_VALIDATED`, `403 PATH_NOT_ALLOWED`, `404 FILE_NOT_FOUND`, `413 FILE_TOO_LARGE`, `415 UNSUPPORTED_FORMAT`, `422 CORRUPTED_FILE / EMPTY_FILE`, `500 EXTRACTION_FAILED`. Un échec d'extraction est aussi enregistré en base (`status = 'error'`).
 
 ---
 
@@ -156,6 +178,7 @@ Copier `.env.example` vers `.env`. Toutes les valeurs ont un défaut.
 - **Confinement des chemins** : `/api/scan` n'accepte que des fichiers situés (après résolution des liens symboliques) dans `INPUT_DIR` ou `ALLOWED_ROOTS`. `/etc/passwd`, `../` et les liens qui sortent de ces dossiers → 403.
 - **Contrôle du contenu** : extension en liste blanche + vérification de la signature binaire (`%PDF-`, zip). Images validées par sharp. Taille max.
 - **pdfjs** avec `isEvalSupported: false`.
+- **UI** : le texte extrait et l'OCR sont des données non fiables, toujours insérés via `textContent` (un test interdit `innerHTML` dans `public/js`).
 - **Serveur** lié à `127.0.0.1`, JSON limité à 1 Mo, en-têtes `CSP` stricts (aucune ressource externe), `nosniff`, `X-Frame-Options: DENY`.
 - **Ollama** : URL refusée si elle ne pointe pas sur localhost. Réponses du LLM filtrées sur les listes fermées.
 - **Pas d'authentification** sur l'UI/API : acceptable pour un MVP lié à `127.0.0.1`, mais à ajouter avant tout déploiement partagé.
@@ -183,7 +206,8 @@ Le cahier des charges demandait Node 18+. Mais les versions de `sharp` compatibl
 
 ```
 ├── src/
-│   ├── index.ts                 # Serveur Express, API, watcher
+│   ├── index.ts                 # Démarrage : serveur, watcher, arrêt propre
+│   ├── app.ts                   # Application Express (routes API), testable
 │   ├── config/
 │   │   ├── env.ts               # Configuration (.env)
 │   │   └── tags.ts              # LISTES FERMÉES + motifs pondérés
@@ -191,18 +215,22 @@ Le cahier des charges demandait Node 18+. Mais les versions de `sharp` compatibl
 │   │   ├── extraction.ts        # PDF (pdfjs), DOCX (mammoth/jszip), images
 │   │   ├── ocr.ts               # tesseract.js local + pré-traitement
 │   │   ├── tagging.ts           # Mots-clés + Ollama (optionnel)
-│   │   ├── storage.ts           # SQLite, migrations, fichiers images
+│   │   ├── storage.ts           # SQLite, migrations, fichiers images, liste des validés
+│   │   ├── thumbnails.ts        # Vignettes sharp + cache
 │   │   └── scanner.ts           # Orchestration extraction → tagging → stockage
 │   ├── types/document.ts
 │   └── utils/logger.ts
-├── public/                      # UI de validation (HTML/CSS/JS sans dépendance)
+├── public/                      # UI (HTML/CSS + modules JS sans dépendance)
+│   └── js/                      # main (routeur), pending, validated, document, viewer, errors
 ├── scripts/
 │   ├── generate-samples.ts      # Génère les 3 documents de test
-│   └── scan-dir.ts              # Scan en ligne de commande
-├── tests/                       # node:test (unitaires + bout en bout)
+│   ├── scan-dir.ts              # Scan en ligne de commande
+│   └── seed-validated.ts        # Documents validés fictifs (tests de volume)
+├── tests/                       # node:test (unitaires, bout en bout, onglet Validés)
+├── docs/                        # Job descriptions des évolutions
 ├── samples/                     # Documents de test générés (fictifs)
 └── data/                        # Runtime, exclu de git
-    ├── input/  images/  tessdata/  scanner.db
+    ├── input/  images/{documentId}/(thumbs/)  tessdata/  scanner.db
 ```
 
 ## Pistes après le MVP

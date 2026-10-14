@@ -93,3 +93,31 @@ export interface ValidationRecord {
   notes: string | null;
   validatedAt: string;
 }
+
+/** Événement de l'historique de validation. */
+export interface ValidationEvent {
+  id: number;
+  documentId: string;
+  action: 'validate' | 'reopen';
+  tags: PlainTags; // tags validés (pour reopen : instantané au moment de la remise en attente)
+  by: string;
+  notes: string | null; // notes de validation, ou motif de remise en attente
+  at: string;
+}
+
+/** Comparaison proposition automatique (tags pré-cochés) ↔ tags validés. */
+export type TagDiff = Record<import('../config/tags.js').TagCategory, { kept: string[]; added: string[]; removed: string[] }>;
+
+export interface ValidatedListItem {
+  documentId: string;
+  filename: string;
+  kind: FileKind;
+  fileSize: number;
+  pageCount: number | null;
+  imageCount: number;
+  autoConfidence: number | null;
+  textPreview: string;
+  scannedAt: string;
+  validation: ValidationRecord;
+  autoTagging?: TaggingResult | null;
+}

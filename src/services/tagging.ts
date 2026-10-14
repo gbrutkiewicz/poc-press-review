@@ -1,6 +1,6 @@
 import { config } from '../config/env.js';
 import { CATEGORY_RULES, KEYWORDS, TAG_LISTS, type TagCategory } from '../config/tags.js';
-import type { ExtractionResult, PlainTags, TaggingResult, TagScore, TagSet } from '../types/document.js';
+import type { ExtractionResult, PlainTags, TagDiff, TaggingResult, TagScore, TagSet } from '../types/document.js';
 import { log } from '../utils/logger.js';
 
 export const CATEGORIES: TagCategory[] = ['sources', 'regions', 'themes', 'products'];
@@ -257,4 +257,34 @@ export function validatePlainTags(input: unknown): { ok: true; tags: PlainTags }
     if (tags[c].length < CATEGORY_RULES[c].min) errors.push(`${CATEGORY_RULES[c].label} : au moins ${CATEGORY_RULES[c].min} valeur requise`);
   }
   return errors.length ? { ok: false, errors } : { ok: true, tags };
+}
+
+/**
+ * Tags pré-cochés dans l'UI : meilleure proposition de chaque catégorie, plus
+ * toute proposition ≥ 0.5. Règle unique, utilisée par l'écran de validation
+ * ET par la comparaison automatique ↔ validé.
+ */
+export function preselectedTags(tagging: TaggingResult | null): PlainTags {
+  const out = {} as PlainTags;
+  for (const c of CATEGORIES) {
+    const list = tagging?.tags[c] ?? [];
+    out[c] = list.filter((t, i) => i === 0 || t.confidence >= 0.5).map((t) => t.value);
+  }
+  return out;
+}
+
+/** Diff entre la proposition pré-cochée et les tags validés par l'humain. */
+export function computeTagDiff(tagging: TaggingResult | null, validated: PlainTags): TagDiff {
+  const auto = preselectedTags(tagging);
+  const out = {} as TagDiff;
+  for (const c of CATEGORIES) {
+    const a = new Set(auto[c]);
+    const v = new Set(validated[c] ?? []);
+    out[c] = {
+      kept: [...v].filter((x) => a.has(x)),
+      added: [...v].filter((x) => !a.has(x)),
+      removed: [...a].filter((x) => !v.has(x)),
+    };
+  }
+  return out;
 }

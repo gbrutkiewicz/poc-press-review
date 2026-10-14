@@ -3,54 +3,35 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Doc Scanner — Validation</title>
+  <title>Doc Scanner — Revue</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-  <header>
-    <h1>Doc Scanner <span>· validation humaine</span></h1>
+  <header class="top">
+    <h1>Doc Scanner <span>· revue de presse</span></h1>
     <div id="stats" class="muted"></div>
   </header>
 
+  <nav class="tabs" role="tablist" aria-label="Sections">
+    <a id="tab-pending" role="tab" href="#/a-valider" aria-selected="false">À valider <span class="count" id="count-pending">–</span></a>
+    <a id="tab-validated" role="tab" href="#/valides" aria-selected="false">Validés <span class="count" id="count-validated">–</span></a>
+    <a id="tab-errors" role="tab" href="#/erreurs" aria-selected="false" hidden>Erreurs <span class="count" id="count-errors">–</span></a>
+  </nav>
+
   <section class="toolbar">
     <form id="scan-form">
-      <input id="scan-path" type="text" placeholder="./data/input/sample-fashion.pdf (ou nom de fichier)" autocomplete="off">
+      <input id="scan-path" type="text" placeholder="./data/input/sample-fashion.pdf (ou nom de fichier)" autocomplete="off" aria-label="Fichier à scanner">
       <button type="submit">Scanner ce fichier</button>
     </form>
     <button id="scan-input" class="secondary">Scanner tout <code id="input-dir">data/input</code></button>
     <a href="/api/export?format=csv" class="secondary button">Export CSV</a>
-    <a href="/api/export" class="secondary button" target="_blank">Export JSON</a>
+    <a href="/api/export" class="secondary button" target="_blank" rel="noopener">Export JSON</a>
   </section>
-  <div id="flash" hidden></div>
+  <div id="flash" role="status" hidden></div>
 
-  <main>
-    <h2>En attente de validation <span id="count" class="muted"></span></h2>
-    <div id="pending"><p class="muted">Chargement…</p></div>
-  </main>
+  <main id="view"><p class="muted">Chargement…</p></main>
 
-  <template id="card-tpl">
-    <article class="card">
-      <div class="card-head">
-        <div>
-          <h3 class="filename"></h3>
-          <div class="meta muted"></div>
-        </div>
-        <div class="conf"></div>
-      </div>
-      <div class="reasons"></div>
-      <p class="preview"></p>
-      <details class="fulltext"><summary>Texte complet &amp; images</summary><pre></pre><div class="thumbs"></div></details>
-      <div class="tags"></div>
-      <div class="actions">
-        <input class="by" type="text" placeholder="Validé par (nom)" maxlength="100">
-        <input class="notes" type="text" placeholder="Notes (optionnel)" maxlength="2000">
-        <button class="validate">✅ Valider</button>
-      </div>
-      <div class="error"></div>
-    </article>
-  </template>
-
-  <script src="/app.js"></script>
+  <script type="module" src="/js/main.js"></script>
 </body>
 </html>

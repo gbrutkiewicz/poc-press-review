@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import { config } from '../config/env.js';
+import { CATEGORIES } from './tagging.js';
 import type {
   DocumentRecord,
   DocumentStatus,
@@ -9,11 +10,13 @@ import type {
   ImageRecord,
   PlainTags,
   TaggingResult,
+  ValidatedListItem,
+  ValidationEvent,
   ValidationRecord,
 } from '../types/document.js';
 
 /** Migrations versionnées, appliquées automatiquement au démarrage. */
-const MIGRATIONS: { version: number; name: string; sql: string }[] = [
+export const MIGRATIONS: { version: number; name: string; sql: string }[] = [
   {
     version: 1,
     name: 'schema initial',
@@ -62,6 +65,19 @@ const MIGRATIONS: { version: number; name: string; sql: string }[] = [
         validated_at    TEXT NOT NULL
       );
       CREATE INDEX idx_validations_document ON validations(document_id);
+    `,
+  },
+  {
+    version: 2,
+    name: 'historique des validations (validate / reopen)',
+    // Une ligne par événement : 'validate' (validation humaine) ou 'reopen'
+    // (remise en attente ; validated_by = auteur, notes = motif,
+    // validated_tags = instantané des tags validés au moment de la remise).
+    sql: `
+      ALTER TABLE validations ADD COLUMN action TEXT NOT NULL DEFAULT 'validate' CHECK (action IN ('validate','reopen'));
+      CREATE INDEX idx_validations_doc_action ON validations(document_id, action, id);
+      CREATE INDEX idx_validations_date ON validations(validated_at DESC);
+      CREATE INDEX idx_validations_by ON validations(validated_by COLLATE NOCASE);
     `,
   },
 ];
@@ -143,6 +159,8 @@ export function saveDocument(input: SaveInput): { document: DocumentRecord; imag
 
     d.transaction(() => {
       const { extraction: ex, tagging: tg } = input;
+      // Un rescan réussi remplace les traces d'échec du même fichier
+      d.prepare(`DELETE FROM documents WHERE file_hash = ? AND status = 'error'`).run(input.fileHash);
       d.prepare(
         `INSERT INTO documents (document_id, filename, file_path, file_hash, kind, mime_type, file_size, page_count,
            extracted_text, metadata_json, tags_json, confidence, requires_review, status, created_at, updated_at)
@@ -268,7 +286,7 @@ export function getImage(documentId: string, imageId: string): ImageRecord | nul
 
 export function getLatestValidation(documentId: string): ValidationRecord | null {
   const r = getDb()
-    .prepare('SELECT * FROM validations WHERE document_id = ? ORDER BY id DESC LIMIT 1')
+    .prepare(`SELECT * FROM validations WHERE document_id = ? AND action = 'validate' ORDER BY id DESC LIMIT 1`)
     .get(documentId) as Record<string, string> | undefined;
   if (!r) return null;
   return {
@@ -289,4 +307,161 @@ export function stats(): Record<DocumentStatus | 'images', number> {
     error: count('error'),
     images: (d.prepare('SELECT COUNT(*) AS n FROM images').get() as { n: number }).n,
   };
+}
+
+/* ------------------------------------------------- historique / reopen -- */
+
+function toEvent(r: Record<string, unknown>): ValidationEvent {
+  return {
+    id: r.id as number,
+    documentId: r.document_id as string,
+    action: r.action as ValidationEvent['action'],
+    tags: JSON.parse(r.validated_tags as string),
+    by: r.validated_by as string,
+    notes: (r.notes as string | null) ?? null,
+    at: r.validated_at as string,
+  };
+}
+
+/** Historique complet (validations + remises en attente), du plus récent au plus ancien. */
+export function getValidationHistory(documentId: string): ValidationEvent[] {
+  return (getDb().prepare('SELECT * FROM validations WHERE document_id = ? ORDER BY id DESC').all(documentId) as Record<string, unknown>[]).map(toEvent);
+}
+
+/** Dernier événement (validate ou reopen) — sert à savoir si un document "pending" a été remis en attente. */
+export function getLastEvent(documentId: string): ValidationEvent | null {
+  const r = getDb().prepare('SELECT * FROM validations WHERE document_id = ? ORDER BY id DESC LIMIT 1').get(documentId) as
+    | Record<string, unknown>
+    | undefined;
+  return r ? toEvent(r) : null;
+}
+
+/** Remet un document validé en attente. Rien n'est supprimé : l'action est tracée. */
+export function reopenDocument(documentId: string, by: string, reason: string): ValidationEvent {
+  const d = getDb();
+  const now = new Date().toISOString();
+  const last = getLatestValidation(documentId);
+  let id = 0;
+  d.transaction(() => {
+    id = Number(
+      d
+        .prepare(`INSERT INTO validations (document_id, validated_tags, validated_by, notes, validated_at, action) VALUES (?, ?, ?, ?, ?, 'reopen')`)
+        .run(documentId, JSON.stringify(last?.validatedTags ?? {}), by, reason, now).lastInsertRowid,
+    );
+    d.prepare(`UPDATE documents SET status = 'pending', updated_at = ? WHERE document_id = ?`).run(now, documentId);
+  })();
+  return { id, documentId, action: 'reopen', tags: last?.validatedTags ?? ({} as PlainTags), by, notes: reason, at: now };
+}
+
+/* ------------------------------------------------- liste des validés -- */
+
+export interface ValidatedQuery {
+  limit?: number;
+  offset?: number;
+  q?: string;
+  category?: string;
+  tag?: string;
+  validatedBy?: string;
+  from?: string; // ISO (date ou date-heure), inclus
+  to?: string; // ISO ; une date seule (AAAA-MM-JJ) inclut toute la journée
+  withTagging?: boolean; // ajoute le tagging automatique (export)
+}
+
+const escapeLike = (s: string) => s.replace(/[\\%_]/g, (c) => `\\${c}`);
+
+/** Dernière validation de chaque document (sous-requête réutilisée). */
+const LATEST_VALIDATION = `
+  SELECT v.* FROM validations v
+  WHERE v.action = 'validate'
+    AND v.id = (SELECT MAX(v2.id) FROM validations v2 WHERE v2.document_id = v.document_id AND v2.action = 'validate')`;
+
+/**
+ * Liste paginée des documents validés, jointe à leur dernière validation,
+ * triée par date de validation décroissante. Le texte complet n'est pas
+ * renvoyé (aperçu de 200 caractères).
+ * Recherche : LIKE sur nom de fichier, texte extrait et notes.
+ * TODO(FTS5) : remplacer le LIKE par une table virtuelle FTS5 au-delà de ~50k documents.
+ */
+export function listValidated(query: ValidatedQuery = {}): { total: number; items: ValidatedListItem[] } {
+  const where: string[] = [`d.status = 'validated'`];
+  const params: unknown[] = [];
+
+  if (query.q?.trim()) {
+    const like = `%${escapeLike(query.q.trim())}%`;
+    where.push(`(d.filename LIKE ? ESCAPE '\\' OR d.extracted_text LIKE ? ESCAPE '\\' OR lv.notes LIKE ? ESCAPE '\\')`);
+    params.push(like, like, like);
+  }
+  if (query.tag) {
+    if (query.category) {
+      // category est contrôlée en amont (liste blanche) : interpolation sûre
+      if (!(CATEGORIES as string[]).includes(query.category)) throw new Error(`Catégorie inconnue : ${query.category}`);
+      where.push(`EXISTS (SELECT 1 FROM json_each(lv.validated_tags, '$.${query.category}') WHERE value = ?)`);
+    } else {
+      where.push(`EXISTS (SELECT 1 FROM json_tree(lv.validated_tags) WHERE type = 'text' AND atom = ?)`);
+    }
+    params.push(query.tag);
+  }
+  if (query.validatedBy?.trim()) {
+    where.push(`lv.validated_by = ? COLLATE NOCASE`);
+    params.push(query.validatedBy.trim());
+  }
+  if (query.from) {
+    where.push(`lv.validated_at >= ?`);
+    params.push(new Date(query.from).toISOString());
+  }
+  if (query.to) {
+    const end = new Date(query.to);
+    if (/^\d{4}-\d{2}-\d{2}$/.test(query.to)) end.setUTCDate(end.getUTCDate() + 1); // journée incluse
+    where.push(/^\d{4}-\d{2}-\d{2}$/.test(query.to) ? `lv.validated_at < ?` : `lv.validated_at <= ?`);
+    params.push(end.toISOString());
+  }
+
+  const from = `FROM documents d JOIN (${LATEST_VALIDATION}) lv ON lv.document_id = d.document_id WHERE ${where.join(' AND ')}`;
+  const d = getDb();
+  const total = (d.prepare(`SELECT COUNT(*) AS n ${from}`).get(...params) as { n: number }).n;
+
+  const limit = Math.min(Math.max(Math.trunc(query.limit ?? 25), 1), query.withTagging ? 1_000_000 : 100);
+  const offset = Math.max(Math.trunc(query.offset ?? 0), 0);
+  const rows = d
+    .prepare(
+      `SELECT d.document_id, d.filename, d.kind, d.file_size, d.page_count, d.confidence, d.created_at,
+              substr(d.extracted_text, 1, 200) AS preview,
+              ${query.withTagging ? 'd.tags_json,' : ''}
+              (SELECT COUNT(*) FROM images i WHERE i.document_id = d.document_id) AS image_count,
+              lv.validated_tags, lv.validated_by, lv.validated_at, lv.notes
+       ${from}
+       ORDER BY lv.validated_at DESC, lv.id DESC
+       LIMIT ? OFFSET ?`,
+    )
+    .all(...params, limit, offset) as Record<string, unknown>[];
+
+  return {
+    total,
+    items: rows.map((r) => ({
+      documentId: r.document_id as string,
+      filename: r.filename as string,
+      kind: r.kind as ValidatedListItem['kind'],
+      fileSize: r.file_size as number,
+      pageCount: r.page_count as number | null,
+      imageCount: r.image_count as number,
+      autoConfidence: r.confidence as number | null,
+      textPreview: r.preview as string,
+      scannedAt: r.created_at as string,
+      validation: {
+        documentId: r.document_id as string,
+        validatedTags: JSON.parse(r.validated_tags as string),
+        validatedBy: r.validated_by as string,
+        validatedAt: r.validated_at as string,
+        notes: (r.notes as string | null) ?? null,
+      },
+      ...(query.withTagging ? { autoTagging: r.tags_json ? JSON.parse(r.tags_json as string) : null } : {}),
+    })),
+  };
+}
+
+/** Validateurs distincts (pour le filtre de l'UI). */
+export function listValidators(): string[] {
+  return (
+    getDb().prepare(`SELECT DISTINCT validated_by AS v FROM validations WHERE action = 'validate' ORDER BY v COLLATE NOCASE`).all() as { v: string }[]
+  ).map((r) => r.v);
 }

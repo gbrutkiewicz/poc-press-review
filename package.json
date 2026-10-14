@@ -14,7 +14,8 @@
     "dev": "npm run build && npm start",
     "samples": "node dist/scripts/generate-samples.js",
     "scan": "node dist/scripts/scan-dir.js",
-    "test": "npm run build && node --test dist/tests/tagging.test.js dist/tests/e2e.test.js"
+    "test": "npm run build && node --test dist/tests/tagging.test.js dist/tests/e2e.test.js dist/tests/validated.test.js",
+    "seed": "node dist/scripts/seed-validated.js"
   },
   "dependencies": {
     "@tesseract.js-data/eng": "^1.0.0",

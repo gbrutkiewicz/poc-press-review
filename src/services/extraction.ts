@@ -158,15 +158,24 @@ async function extractPdf(buf: Buffer): Promise<PartialExtraction> {
 
       // --- Texte : reconstruction des lignes via hasEOL / position verticale
       const content = await page.getTextContent();
+      // (un seul saut par changement de ligne ; ligne vide si l'écart vertical
+      //  dépasse 1,8 × la hauteur de ligne, c.-à-d. un vrai changement de paragraphe)
       let text = '';
       let lastY: number | null = null;
+      let lastH = 0;
       for (const item of content.items) {
         if (!('str' in item)) continue;
         const y = item.transform[5];
-        if (lastY !== null && Math.abs(y - lastY) > 2 && !text.endsWith('\n')) text += '\n';
+        if (lastY !== null && Math.abs(y - lastY) > 2) {
+          if (!text.endsWith('\n')) text += '\n';
+          if (lastH > 0 && Math.abs(y - lastY) > lastH * 1.8 && !text.endsWith('\n\n')) text += '\n';
+        }
         text += item.str;
-        if (item.hasEOL) text += '\n';
-        lastY = y;
+        if (item.hasEOL && !text.endsWith('\n')) text += '\n';
+        if (item.str.trim()) {
+          lastY = y;
+          lastH = item.height || lastH;
+        }
       }
       pageTexts.push(`--- Page ${n} ---\n${normalizeWhitespace(text)}`);
 
