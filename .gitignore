@@ -1,0 +1,16 @@
+node_modules/
+dist/
+.env
+
+# Données runtime (jamais versionnées : documents clients, extractions, base)
+data/input/*
+!data/input/.gitkeep
+data/images/*
+!data/images/.gitkeep
+data/tessdata/
+data/*.db
+data/*.db-*
+data/exports/
+
+.DS_Store
+*.log
