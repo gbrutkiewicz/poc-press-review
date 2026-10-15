@@ -152,3 +152,39 @@ mark { background: var(--mark); color: inherit; border-radius: 2px; } mark.curre
   .viewer { padding: 56px 8px 16px; }
   .viewer .nav { top: auto; bottom: 12px; transform: none; }
 }
+
+/* ---- upload */
+.upload-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.upload-controls label.auto { display: flex; align-items: center; gap: 4px; font-size: 13px; color: var(--muted); white-space: nowrap; }
+.toolbar { align-items: center; }
+.uploads { margin: 0 24px 10px; background: #fff; border: 1px solid var(--line); border-radius: 6px; padding: 10px 14px; max-width: 1152px; }
+.upload-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.upload-head .spacer { flex: 1; }
+.upload-list { list-style: none; margin: 8px 0 0; padding: 0; }
+.upload-list li { display: grid; grid-template-columns: minmax(0, 2fr) 70px minmax(0, 1fr) minmax(0, 2fr) auto; gap: 10px; align-items: center; padding: 6px 0; border-top: 1px solid var(--line); font-size: 13px; }
+.upload-list li:first-child { border-top: 0; }
+.upload-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.upload-list progress { width: 100%; height: 8px; accent-color: var(--ink); }
+.upload-list li.ok .upload-status { color: var(--ok); }
+.upload-list li.dup .upload-status { color: var(--muted); }
+.upload-list li.err .upload-status { color: var(--err); }
+.upload-list li[class] progress { display: none; }
+.upload-list li .upload-status { grid-column: span 1; }
+.upload-list li[class] .upload-status { grid-column: 3 / span 2; }
+.drop-overlay { position: fixed; inset: 0; z-index: 90; background: rgba(250, 249, 247, .9); display: flex; align-items: center; justify-content: center; pointer-events: none; }
+.drop-overlay div { padding: 40px 56px; border: 2px dashed var(--ink); border-radius: 10px; font-size: 18px; font-weight: 600; background: #fff; }
+.count.alert { background: #fff7e6; color: var(--warn); }
+.status.new, .status.queued { background: var(--soft); color: var(--ink); }
+.file-row { grid-template-columns: minmax(0, 2fr) minmax(0, 1.2fr) minmax(0, 1fr); cursor: default; }
+.actions-cell { display: flex; gap: 10px; align-items: center; justify-content: flex-end; flex-wrap: wrap; }
+@media (max-width: 760px) {
+  .uploads { margin: 0 16px 10px; }
+  .upload-list li { grid-template-columns: minmax(0, 1fr) auto; }
+  .upload-list li progress, .upload-list li .upload-status, .upload-list li[class] .upload-status { grid-column: 1 / -1; }
+  .file-row { grid-template-columns: minmax(0, 1fr); }
+  .actions-cell { justify-content: flex-start; }
+}
+@media (max-width: 760px) {
+  .toolbar button, .toolbar .button { white-space: normal; text-align: left; max-width: 100%; }
+  .toolbar code { word-break: break-all; }
+}

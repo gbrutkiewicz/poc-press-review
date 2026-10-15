@@ -46,7 +46,7 @@ export function detectKind(filePath: string): { kind: FileKind; mime: string } {
 }
 
 /** Vérifie la signature binaire (évite qu'un .pdf renommé soit traité comme tel). */
-function checkMagicBytes(buf: Buffer, kind: FileKind): void {
+export function checkMagicBytes(buf: Buffer, kind: FileKind): void {
   const head = buf.subarray(0, 12);
   const ok =
     kind === 'pdf'

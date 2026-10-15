@@ -16,10 +16,12 @@
   <nav class="tabs" role="tablist" aria-label="Sections">
     <a id="tab-pending" role="tab" href="#/a-valider" aria-selected="false">À valider <span class="count" id="count-pending">–</span></a>
     <a id="tab-validated" role="tab" href="#/valides" aria-selected="false">Validés <span class="count" id="count-validated">–</span></a>
+    <a id="tab-files" role="tab" href="#/fichiers" aria-selected="false">Fichiers <span class="count" id="count-files">–</span></a>
     <a id="tab-errors" role="tab" href="#/erreurs" aria-selected="false" hidden>Erreurs <span class="count" id="count-errors">–</span></a>
   </nav>
 
   <section class="toolbar">
+    <div id="upload-slot"></div>
     <form id="scan-form">
       <input id="scan-path" type="text" placeholder="./data/input/sample-fashion.pdf (ou nom de fichier)" autocomplete="off" aria-label="Fichier à scanner">
       <button type="submit">Scanner ce fichier</button>

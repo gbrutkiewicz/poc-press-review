@@ -150,17 +150,3 @@ export function listInputFiles(dir = config.inputDir): string[] {
     .sort()
     .map((f) => path.join(dir, f));
 }
-
-/** Scanne séquentiellement (l'OCR est gourmand : pas de parallélisme en MVP). */
-export async function scanDirectory(dir = config.inputDir, opts: { force?: boolean } = {}) {
-  const results: { file: string; ok: boolean; documentId?: string; duplicate?: boolean; error?: string; code?: string }[] = [];
-  for (const file of listInputFiles(dir)) {
-    try {
-      const r = await scanFile(file, opts);
-      results.push({ file: path.basename(file), ok: true, documentId: r.documentId, duplicate: r.duplicate });
-    } catch (err) {
-      results.push({ file: path.basename(file), ok: false, error: (err as Error).message, code: (err as ScanError).code });
-    }
-  }
-  return results;
-}

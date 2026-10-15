@@ -3,7 +3,8 @@ import fs from 'node:fs';
 import { createApp } from './app.js';
 import { config, rel } from './config/env.js';
 import { shutdownOcr } from './services/ocr.js';
-import { scanFile } from './services/scanner.js';
+import { enqueueInBackground } from './services/scanQueue.js';
+import { cleanupPartials } from './services/upload.js';
 import { closeDb, getDb, stats } from './services/storage.js';
 import { isOllamaAvailable } from './services/tagging.js';
 import { log } from './utils/logger.js';
@@ -16,31 +17,15 @@ async function startWatcher(): Promise<{ close: () => Promise<void> } | null> {
   if (!config.watch) return null;
   try {
     const { default: chokidar } = await import('chokidar');
-    const queue: string[] = [];
-    let busy = false;
-    const drain = async () => {
-      if (busy) return;
-      busy = true;
-      while (queue.length) {
-        const file = queue.shift()!;
-        try {
-          await scanFile(file);
-        } catch (err) {
-          log.error(`Watcher : ${path.basename(file)}`, err);
-        }
-      }
-      busy = false;
-    };
     const watcher = chokidar.watch(config.inputDir, {
       ignoreInitial: true,
       depth: 0,
-      ignored: (p: string) => path.basename(p).startsWith('.'),
+      ignored: (p: string) => path.basename(p).startsWith('.'), // fichiers cachés et .upload-*.part
       awaitWriteFinish: { stabilityThreshold: 1000, pollInterval: 200 },
     });
     watcher.on('add', (file: string) => {
       log.info(`👀 Nouveau fichier : ${path.basename(file)}`);
-      queue.push(file);
-      void drain();
+      enqueueInBackground(file, 'watcher'); // file unique : pas de double scan avec l'upload
     });
     return watcher;
   } catch {
@@ -53,6 +38,8 @@ async function startWatcher(): Promise<{ close: () => Promise<void> } | null> {
 
 async function main() {
   fs.mkdirSync(config.inputDir, { recursive: true });
+  const partials = cleanupPartials();
+  if (partials) log.info(`🧹 ${partials} envoi(s) interrompu(s) nettoyé(s) dans ${rel(config.inputDir)}`);
   getDb(); // migrations auto
 
   const server = app.listen(config.port, config.host, () => {

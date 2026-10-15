@@ -49,7 +49,7 @@ curl -X POST http://localhost:3000/api/validations/save \
 ```
 
 Sans serveur : `npm run scan` scanne `data/input/` et affiche un résumé.
-Tests : `npm test` (25 tests : tagging unitaire, bout en bout sur les 3 samples, onglet « Validés »).
+Tests : `npm test` (35 tests : tagging et OCR, bout en bout sur les 3 samples, onglet « Validés », upload).
 
 ### Consulter les documents validés
 
@@ -59,6 +59,7 @@ L'interface a trois onglets :
 |---|---|---|
 | **À valider** | `#/a-valider` | Documents en attente, tags proposés pré-cochés, bouton ✅ Valider |
 | **Validés** | `#/valides` | Liste paginée (25/page), dernière validation d'abord : id copiable, tags validés, validateur, date. Recherche (nom, texte, notes), filtres par tag, validateur et période, export CSV de la sélection |
+| **Fichiers** | `#/fichiers` | Contenu de `data/input/` et statut de scan de chaque fichier |
 | **Erreurs** | `#/erreurs` | Visible seulement s'il y a des échecs d'extraction ; bouton « Rescanner » |
 
 Un clic sur un document ouvre sa **fiche** (`#/documents/{id}`, lien direct qui survit au rafraîchissement) :
@@ -72,7 +73,10 @@ Pour tester la liste avec du volume : `npm run seed -- 50` (ou `10000`) crée de
 
 ### Vos propres documents
 
-Déposez-les dans `data/input/`. Avec le serveur lancé, la surveillance (`WATCH=true`) les scanne automatiquement à l'arrivée. Sinon, utilisez le bouton de l'UI ou `npm run scan`.
+**Depuis l'interface** : bouton **« ⬆ Déposer des fichiers »** (plusieurs à la fois), **glisser-déposer** n'importe où sur la page, ou **coller une capture d'écran** (Cmd/Ctrl + V → enregistrée sous `capture-AAAAMMJJ-HHMMSS.png`). Chaque fichier affiche sa progression puis son résultat : lien vers la fiche, « Déjà présent » (même contenu déjà scanné) ou erreur expliquée. La case « Scanner automatiquement » permet de seulement déposer.
+L'onglet **Fichiers** liste le contenu de `data/input/` avec le statut de chaque fichier (non scanné, à valider, validé, erreur) et un bouton pour scanner ceux qui ne l'ont pas été.
+
+**À la main** : copiez-les dans `data/input/`. Avec le serveur lancé, la surveillance (`WATCH=true`) les scanne automatiquement à l'arrivée. Sinon, utilisez le bouton de l'UI ou `npm run scan`.
 Le contenu de `data/` (documents, images extraites, base SQLite) est **exclu de git**.
 
 ---
@@ -114,6 +118,9 @@ Le contenu de `data/` (documents, images extraites, base SQLite) est **exclu de 
 | `POST` | `/api/scan/input` | Scanne tout `data/input` (fichiers déjà vus ignorés sauf `force: true`) |
 | `GET` | `/api/validations/pending` | Documents en attente, plus récents d'abord |
 | `POST` | `/api/validations/save` | `{ documentId, tags, validatedBy, notes }` → marque `validated` |
+| `POST` | `/api/upload?filename=<nom>&scan=1\|0` | Corps : le fichier brut (`Content-Type: application/octet-stream`). Enregistre dans `data/input/` puis scanne (si `scan=1`, défaut). Réponse `{ file: { name, savedAs, size, sha256 }, duplicate, documentId, scan }` |
+| `GET` | `/api/input` | Fichiers de `data/input/` et leur statut (`new`, `queued`, `scanning`, `pending`, `validated`, `error`, `unsupported`) |
+| `GET` | `/api/queue` | État de la file de scan (fichier en cours, fichiers en attente) |
 | `GET` | `/api/validated` | Documents validés, paginés et filtrés : `limit` (1–100, défaut 25), `offset`, `q`, `category` + `tag`, `validatedBy`, `from`, `to` (AAAA-MM-JJ). Réponse `{ total, items, validators }` |
 | `POST` | `/api/documents/:id/reopen` | `{ by, reason }` → remet un document validé en attente (409 sinon) |
 | `GET` | `/api/documents/:id/text` | Texte extrait en `.txt` |
@@ -124,7 +131,7 @@ Le contenu de `data/` (documents, images extraites, base SQLite) est **exclu de 
 | `GET` | `/api/config/tags` | Listes fermées et seuil |
 | `GET` | `/api/health` | État, compteurs, disponibilité d'Ollama |
 
-Les identifiants (`:id`, `:imageId`) doivent être des UUID (`400 BAD_ID` sinon). Codes d'erreur : `400 BAD_REQUEST / BAD_JSON / BAD_QUERY / BAD_TAGS`, `409 NOT_VALIDATED`, `403 PATH_NOT_ALLOWED`, `404 FILE_NOT_FOUND`, `413 FILE_TOO_LARGE`, `415 UNSUPPORTED_FORMAT`, `422 CORRUPTED_FILE / EMPTY_FILE`, `500 EXTRACTION_FAILED`. Un échec d'extraction est aussi enregistré en base (`status = 'error'`).
+Les identifiants (`:id`, `:imageId`) doivent être des UUID (`400 BAD_ID` sinon). Codes d'erreur : `400 BAD_REQUEST / BAD_JSON / BAD_QUERY / BAD_TAGS / BAD_FILENAME`, `409 NOT_VALIDATED`, `403 PATH_NOT_ALLOWED / CROSS_ORIGIN / BAD_HOST`, `404 FILE_NOT_FOUND`, `413 FILE_TOO_LARGE`, `415 UNSUPPORTED_FORMAT`, `422 CORRUPTED_FILE / EMPTY_FILE`, `500 EXTRACTION_FAILED`. Un échec d'extraction est aussi enregistré en base (`status = 'error'`).
 
 ---
 
@@ -175,6 +182,9 @@ Copier `.env.example` vers `.env`. Toutes les valeurs ont un défaut.
 ## Sécurité (choix du MVP)
 
 - **Pas de réseau sortant** : modèles OCR embarqués (`@tesseract.js-data/fra|eng`) copiés dans `data/tessdata/`. Le moteur WASM tesseract est lu depuis `node_modules`. pdfjs lit ses polices depuis le disque.
+- **File de scan unique** : surveillance du dossier, API et upload passent par la même file séquentielle (`src/services/scanQueue.ts`). Un fichier n'est jamais scanné deux fois en parallèle.
+- **Upload** : nom assaini (pas de chemin, caractères de contrôle et réservés retirés, NFC, 150 caractères max), extension en liste blanche, signature binaire et décodage d'image vérifiés, taille limitée pendant la réception, écriture dans un fichier caché `.upload-*.part` puis publication atomique **sans jamais écraser** (suffixe ` (2)`). Les envois interrompus sont nettoyés au démarrage.
+- **Protection contre les sites tiers** : un site malveillant ouvert dans le navigateur peut tenter d'appeler `http://localhost:3000`. Les requêtes dont l'en-tête `Host` ne désigne pas la machine locale (DNS rebinding) et les POST venant d'une autre origine (`Origin`, `Sec-Fetch-Site: cross-site`) sont refusés (403). curl et les scripts restent acceptés.
 - **Confinement des chemins** : `/api/scan` n'accepte que des fichiers situés (après résolution des liens symboliques) dans `INPUT_DIR` ou `ALLOWED_ROOTS`. `/etc/passwd`, `../` et les liens qui sortent de ces dossiers → 403.
 - **Contrôle du contenu** : extension en liste blanche + vérification de la signature binaire (`%PDF-`, zip). Images validées par sharp. Taille max.
 - **pdfjs** avec `isEvalSupported: false`.
@@ -217,11 +227,13 @@ Le cahier des charges demandait Node 18+. Mais les versions de `sharp` compatibl
 │   │   ├── tagging.ts           # Mots-clés + Ollama (optionnel)
 │   │   ├── storage.ts           # SQLite, migrations, fichiers images, liste des validés
 │   │   ├── thumbnails.ts        # Vignettes sharp + cache
+│   │   ├── scanQueue.ts         # File de scan unique (watcher, API, upload)
+│   │   ├── upload.ts            # Réception des fichiers déposés
 │   │   └── scanner.ts           # Orchestration extraction → tagging → stockage
 │   ├── types/document.ts
 │   └── utils/logger.ts
 ├── public/                      # UI (HTML/CSS + modules JS sans dépendance)
-│   └── js/                      # main (routeur), pending, validated, document, viewer, errors
+│   └── js/                      # main (routeur), pending, validated, document, viewer, files, upload, errors
 ├── scripts/
 │   ├── generate-samples.ts      # Génère les 3 documents de test
 │   ├── scan-dir.ts              # Scan en ligne de commande

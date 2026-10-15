@@ -5,7 +5,7 @@
  */
 import path from 'node:path';
 import { config, rel } from '../src/config/env.js';
-import { scanDirectory } from '../src/services/scanner.js';
+import { scanDirectory } from '../src/services/scanQueue.js';
 import { closeDb, getDocument } from '../src/services/storage.js';
 import { shutdownOcr } from '../src/services/ocr.js';
 

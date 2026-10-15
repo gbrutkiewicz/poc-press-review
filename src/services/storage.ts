@@ -465,3 +465,9 @@ export function listValidators(): string[] {
     getDb().prepare(`SELECT DISTINCT validated_by AS v FROM validations WHERE action = 'validate' ORDER BY v COLLATE NOCASE`).all() as { v: string }[]
   ).map((r) => r.v);
 }
+
+/** Dernier document (y compris en erreur) correspondant à une empreinte. */
+export function findAnyByHash(hash: string): DocumentRecord | null {
+  const r = getDb().prepare(`SELECT * FROM documents WHERE file_hash = ? ORDER BY created_at DESC, rowid DESC LIMIT 1`).get(hash) as DocRow | undefined;
+  return r ? toRecord(r) : null;
+}

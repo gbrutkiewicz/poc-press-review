@@ -1,10 +1,13 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import { config, PROJECT_ROOT, rel } from './config/env.js';
 import { TAG_LISTS, CATEGORY_RULES } from './config/tags.js';
-import { ScanError, scanDirectory, scanFile } from './services/scanner.js';
+import { ScanError } from './services/scanner.js';
+import { enqueue, queueState, scanDirectory } from './services/scanQueue.js';
 import {
+  findAnyByHash,
   getDocument,
   getDocumentFull,
   getImage,
@@ -21,6 +24,9 @@ import {
 } from './services/storage.js';
 import { CATEGORIES, computeTagDiff, isOllamaAvailable, preselectedTags, validatePlainTags } from './services/tagging.js';
 import { getThumbnailPath } from './services/thumbnails.js';
+import { receiveUpload } from './services/upload.js';
+import { SUPPORTED_EXTENSIONS } from './services/extraction.js';
+import { queueStatusOf } from './services/scanQueue.js';
 import type { DocumentStatus } from './types/document.js';
 import { log } from './utils/logger.js';
 
@@ -71,6 +77,47 @@ function parseValidatedQuery(q: Request['query']): ValidatedQuery {
   return out;
 }
 
+const LOOPBACK = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
+const hostnameOf = (hostHeader: string) => hostHeader.replace(/:\d+$/, '').toLowerCase();
+
+/**
+ * Protection du serveur local contre les pages web tierces ouvertes dans le navigateur :
+ * - DNS rebinding : l'en-tête Host doit désigner la machine locale (ou HOST configuré) ;
+ * - CSRF : une requête qui modifie quelque chose (POST…) venant d'une autre origine est refusée.
+ * Les clients sans navigateur (curl, scripts) n'envoient pas d'Origin et restent acceptés.
+ */
+function localOnly(req: Request, _res: Response, next: NextFunction) {
+  const host = req.headers.host ?? '';
+  const allowed = LOOPBACK.has(hostnameOf(host)) || hostnameOf(host) === config.host.toLowerCase();
+  if (!allowed) return next(new HttpError(403, 'BAD_HOST', `Hôte non autorisé : ${host.slice(0, 100)}`));
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
+    const origin = req.headers.origin;
+    let sameOrigin = true;
+    if (origin) {
+      try {
+        sameOrigin = new URL(origin).host.toLowerCase() === host.toLowerCase();
+      } catch {
+        sameOrigin = false;
+      }
+    }
+    if (!sameOrigin || req.headers['sec-fetch-site'] === 'cross-site') {
+      return next(new HttpError(403, 'CROSS_ORIGIN', 'Requête provenant d’un autre site refusée'));
+    }
+  }
+  next();
+}
+
+/** Empreinte des fichiers de data/input, mise en cache par (chemin, taille, date). */
+const hashCache = new Map<string, { sig: string; hash: string }>();
+function cachedHash(file: string, st: fs.Stats): string {
+  const sig = `${st.size}:${st.mtimeMs}`;
+  const hit = hashCache.get(file);
+  if (hit?.sig === sig) return hit.hash;
+  const hash = crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+  hashCache.set(file, { sig, hash });
+  return hash;
+}
+
 /** Nom de fichier sûr pour Content-Disposition (ASCII + variante UTF-8 encodée). */
 function attachment(res: Response, filename: string): void {
   const ascii = filename.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_');
@@ -80,6 +127,7 @@ function attachment(res: Response, filename: string): void {
 export function createApp() {
   const app = express();
   app.disable('x-powered-by');
+  app.use(localOnly);
   app.use(express.json({ limit: '1mb' }));
 
   // En-têtes de sécurité minimaux (UI locale, aucune ressource externe)
@@ -109,14 +157,86 @@ export function createApp() {
   }));
 
   app.get('/api/config/tags', (_req, res) => {
-    res.json({ lists: TAG_LISTS, rules: CATEGORY_RULES, reviewThreshold: config.reviewThreshold, inputDir: rel(config.inputDir) });
+    res.json({
+      lists: TAG_LISTS,
+      rules: CATEGORY_RULES,
+      reviewThreshold: config.reviewThreshold,
+      inputDir: rel(config.inputDir),
+      maxFileSizeMb: config.maxFileSize / 1048576,
+      extensions: Object.keys(SUPPORTED_EXTENSIONS),
+    });
   });
 
   /** POST /api/scan  { filePath, force? } */
   app.post('/api/scan', wrap(async (req, res) => {
-    const result = await scanFile(req.body?.filePath, { force: req.body?.force === true });
+    const result = await enqueue(req.body?.filePath, { force: req.body?.force === true, source: 'api' });
     res.status(result.duplicate ? 200 : 201).json(result);
   }));
+
+  /**
+   * POST /api/upload?filename=<nom>&scan=1|0 — corps : le fichier brut (application/octet-stream).
+   * Enregistre dans INPUT_DIR (nom assaini, contenu contrôlé, jamais d'écrasement) puis,
+   * si scan=1 (défaut), le scanne via la file unique et renvoie le résultat.
+   */
+  app.post('/api/upload', wrap(async (req, res) => {
+    const ctype = String(req.headers['content-type'] ?? '').split(';')[0].trim().toLowerCase();
+    if (ctype && ctype !== 'application/octet-stream') {
+      req.resume();
+      throw new HttpError(415, 'BAD_CONTENT_TYPE', 'Envoyer le fichier brut avec Content-Type: application/octet-stream');
+    }
+    let saved;
+    try {
+      saved = await receiveUpload(req, req.query.filename);
+    } catch (err) {
+      if ((err as ScanError).code === 'FILE_TOO_LARGE') res.setHeader('Connection', 'close');
+      throw err;
+    }
+    log.info(`📥 Reçu ${saved.savedAs} (${(saved.size / 1024).toFixed(0)} Ko)${saved.duplicate ? ' — déjà présent' : ''}`);
+    const file = { name: saved.name, savedAs: saved.savedAs, size: saved.size, sha256: saved.sha256 };
+
+    if (req.query.scan === '0') {
+      const known = findAnyByHash(saved.sha256);
+      return res.status(saved.duplicate ? 200 : 201).json({ success: true, file, duplicate: saved.duplicate, documentId: known?.documentId ?? null, scan: null });
+    }
+    try {
+      const scan = await enqueue(saved.path, { source: 'upload' });
+      const duplicate = saved.duplicate || scan.duplicate;
+      // la réponse n'embarque pas le texte complet (déjà visible dans la fiche)
+      const { document: _d, ...rest } = scan;
+      if (rest.extraction) rest.extraction = { ...rest.extraction, text: '' };
+      res.status(duplicate ? 200 : 201).json({ success: true, file, duplicate, documentId: scan.documentId, scan: rest });
+    } catch (err) {
+      // fichier bien enregistré mais scan en échec : visible dans l'onglet Erreurs
+      const e = err as ScanError;
+      res.status(201).json({ success: true, file, duplicate: saved.duplicate, documentId: null, scan: null, scanError: { code: e.code ?? 'SCAN_FAILED', error: e.message } });
+    }
+  }));
+
+  /** GET /api/input — fichiers de INPUT_DIR et leur statut de scan */
+  app.get('/api/input', (_req, res) => {
+    const dir = config.inputDir;
+    const files = fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => !f.startsWith('.')) : [];
+    const items = files
+      .map((name) => {
+        const abs = path.join(dir, name);
+        const st = fs.statSync(abs);
+        if (!st.isFile()) return null;
+        const supported = !!SUPPORTED_EXTENSIONS[path.extname(name).toLowerCase()];
+        const base = { name, size: st.size, modifiedAt: st.mtime.toISOString(), supported };
+        if (!supported) return { ...base, status: 'unsupported', documentId: null, error: null };
+        const q = queueStatusOf(fs.realpathSync(abs));
+        if (q) return { ...base, status: q, documentId: null, error: null };
+        const doc = findAnyByHash(cachedHash(abs, st));
+        if (!doc) return { ...base, status: 'new', documentId: null, error: null };
+        return { ...base, status: doc.status, documentId: doc.documentId, error: doc.error };
+      })
+      .filter(Boolean)
+      .sort((a, b) => b!.modifiedAt.localeCompare(a!.modifiedAt));
+    res.json({ inputDir: rel(dir), items, queue: queueState() });
+  });
+
+  /** GET /api/queue — état de la file de scan */
+  app.get('/api/queue', (_req, res) => res.json(queueState()));
 
   /** POST /api/scan/input  — scanne tout INPUT_DIR (fichiers déjà vus ignorés) */
   app.post('/api/scan/input', wrap(async (req, res) => {

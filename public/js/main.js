@@ -4,13 +4,15 @@ import { renderPending } from './pending.js';
 import { renderValidated } from './validated.js';
 import { renderDocument } from './document.js';
 import { renderErrors } from './errors.js';
+import { renderFiles } from './files.js';
+import { initUpload } from './upload.js';
 
 /**
  * Routeur par hash :
- *   #/a-valider (défaut) · #/valides?filtres · #/documents/{id} · #/erreurs
+ *   #/a-valider (défaut) · #/valides?filtres · #/documents/{id} · #/fichiers · #/erreurs
  */
 const view = $('#view');
-const tabs = { pending: $('#tab-pending'), validated: $('#tab-validated'), errors: $('#tab-errors') };
+const tabs = { pending: $('#tab-pending'), validated: $('#tab-validated'), files: $('#tab-files'), errors: $('#tab-errors') };
 
 function parseHash() {
   const raw = location.hash.replace(/^#/, '') || '/a-valider';
@@ -26,6 +28,10 @@ async function refreshStats() {
     $('#count-errors').textContent = stats.error;
     tabs.errors.hidden = stats.error === 0 && !location.hash.startsWith('#/erreurs');
     $('#stats').textContent = `${stats.images} image(s) · Ollama : ${ollama}`;
+    const input = await api('/api/input');
+    const todo = input.items.filter((i) => i.status === 'new').length;
+    $('#count-files').textContent = todo ? `${todo} à scanner` : input.items.length;
+    $('#count-files').classList.toggle('alert', todo > 0);
   } catch { /* serveur arrêté */ }
 }
 
@@ -49,6 +55,9 @@ async function route() {
     } else if (path === '/valides') {
       setTab('validated');
       await renderValidated(view, params);
+    } else if (path === '/fichiers') {
+      setTab('files');
+      await renderFiles(view, ctx);
     } else if (path === '/erreurs') {
       setTab('errors');
       await renderErrors(view, ctx);
@@ -101,6 +110,14 @@ window.addEventListener('hashchange', route);
   try {
     await loadConfig();
     $('#input-dir').textContent = CONFIG.inputDir;
+    initUpload({
+      onChange: ({ partial, anyScanned }) => {
+        const { path } = parseHash();
+        // fin d'un lot : on rafraîchit la vue si elle affiche les fichiers ou les documents à valider
+        if (path === '/fichiers' || (!partial && anyScanned && path === '/a-valider')) route();
+        else refreshStats();
+      },
+    });
     await route();
   } catch (err) {
     flash(`Serveur injoignable : ${err.message}`, 'err');
