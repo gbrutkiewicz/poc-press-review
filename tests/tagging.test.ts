@@ -65,3 +65,29 @@ test('OCR : nettoyage des lignes bruit', async () => {
   const out = cleanOcrText(">» è = 4 >\nai . i, v - 3\nCampagne Chanel Automne-Hiver 2026.\n12 458 J'aime\n#chanel #parfum");
   assert.equal(out, "Campagne Chanel Automne-Hiver 2026.\n12 458 J'aime\n#chanel #parfum");
 });
+
+test('OCR : débris de photo retirés en début et fin de ligne', async () => {
+  const { cleanLine } = await import('../src/services/ocr.js');
+  // ligne de 30 px de haut ; mots = [texte, confiance, x0, x1]
+  const line = (...words: [string, number, number, number][]) => ({
+    bbox: { x0: 0, y0: 0, x1: 2000, y1: 30 },
+    words: words.map(([text, confidence, x0, x1]) => ({ text, confidence, bbox: { x0, y0: 0, x1, y1: 30 } })),
+  });
+  // débris séparés par un grand écart (> 2 × hauteur), confiance basse
+  assert.equal(
+    cleanLine(line(['A', 40, 10, 30], ['Ce', 35, 60, 100], ['haute', 95, 400, 480], ['joaillerie', 94, 490, 620], ['chargé', 93, 630, 720])),
+    'haute joaillerie chargé',
+  );
+  // débris en fin de ligne, collés au texte : retirés par la confiance de bord
+  assert.equal(
+    cleanLine(line(['Céline', 95, 10, 100], ['Dion', 94, 110, 170], ['g', 20, 180, 190], ['FN', 30, 200, 240])),
+    'Céline Dion',
+  );
+  // groupe parasite de caractères isolés, même avec une bonne confiance
+  assert.equal(cleanLine(line(['/', 85, 10, 20], ['A', 90, 30, 45], ['Un', 93, 400, 430], ['appartement', 91, 440, 600])), 'Un appartement');
+  // symbole isolé en bord de ligne ; les guillemets français sont conservés
+  assert.equal(cleanLine(line(['’', 80, 380, 388], ['Un', 93, 400, 430], ['salon', 91, 440, 520])), 'Un salon');
+  assert.equal(cleanLine(line(['«', 90, 380, 395], ['Un', 93, 400, 430], ['salon', 91, 440, 520], ['»', 90, 525, 540])), '« Un salon »');
+  // un mot réel peu sûr au milieu d'une phrase est gardé
+  assert.equal(cleanLine(line(['souvent', 96, 10, 90], ['imposée', 23, 100, 180], ['aux', 96, 190, 220])), 'souvent imposée aux');
+});

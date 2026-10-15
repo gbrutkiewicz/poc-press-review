@@ -70,8 +70,84 @@ export async function ocrImage(input: Buffer): Promise<OcrResult> {
   const prepared = await pipeline.png().toBuffer();
 
   const worker = await getWorker();
-  const { data } = await worker.recognize(prepared);
-  return { text: cleanOcrText(data.text), confidence: (data.confidence ?? 0) / 100 };
+  const { data } = await worker.recognize(prepared, {}, { text: true, blocks: true });
+  const text = data.blocks?.length ? rebuildText(data.blocks as OcrBlock[]) : data.text;
+  return { text: cleanOcrText(text), confidence: (data.confidence ?? 0) / 100 };
+}
+
+/* ------------------------------------------- filtrage des mots parasites -- */
+
+// Sous-ensemble de la structure renvoyée par tesseract.js (output.blocks)
+export interface OcrWord { text: string; confidence: number; bbox: { x0: number; y0: number; x1: number; y1: number } }
+export interface OcrLine { words: OcrWord[]; bbox: { x0: number; y0: number; x1: number; y1: number } }
+export interface OcrBlock { paragraphs: { lines: OcrLine[] }[] }
+
+/** Écart horizontal (en hauteurs de ligne) au-delà duquel deux mots n'appartiennent pas au même texte. */
+const GAP_FACTOR = 2;
+/** Confiance moyenne minimale (pondérée par la longueur) d'un groupe de mots conservé. */
+const MIN_GROUP_CONFIDENCE = 70;
+/** Un mot en bord de groupe sous ce seuil est retiré (débris type « g FN » en fin de ligne). */
+const MIN_EDGE_CONFIDENCE = 55;
+
+/** Symbole isolé sans lettre ni chiffre, improbable en bord de ligne (les guillemets « » et tirets restent). */
+const STRAY_SYMBOL = /^[^\p{L}\p{N}«»"(\[–—-]+$/u;
+
+const alnumCount = (s: string) => (s.match(/[\p{L}\p{N}]/gu) ?? []).length;
+
+const meanConfidence = (words: OcrWord[]) => {
+  const len = words.reduce((n, w) => n + w.text.length, 0) || 1;
+  return words.reduce((n, w) => n + w.confidence * w.text.length, 0) / len;
+};
+
+/**
+ * Nettoie une ligne OCR. Sur une capture composite (photo + texte), tesseract
+ * lit les zones photo comme des caractères, collés en début ou fin des vraies
+ * lignes. Ces débris ont une confiance basse et sont séparés du texte par un
+ * grand écart horizontal :
+ *   1. la ligne est découpée en groupes de mots aux grands écarts ;
+ *   2. les groupes de faible confiance moyenne sont supprimés ;
+ *   3. dans les groupes gardés, les mots douteux aux extrémités sont retirés.
+ */
+export function cleanLine(line: OcrLine): string {
+  const words = line.words.filter((w) => w.text.trim());
+  if (!words.length) return '';
+  const height = Math.max(1, line.bbox.y1 - line.bbox.y0);
+
+  const groups: OcrWord[][] = [[words[0]]];
+  for (let i = 1; i < words.length; i++) {
+    const gap = words[i].bbox.x0 - words[i - 1].bbox.x1;
+    if (gap > height * GAP_FACTOR) groups.push([words[i]]);
+    else groups[groups.length - 1].push(words[i]);
+  }
+
+  return groups
+    // gardé si confiance moyenne suffisante, ou si au moins deux vrais mots sont sûrs
+    // (une ligne courte avec un mot mal lu ne doit pas disparaître)
+    .filter((g) => meanConfidence(g) >= MIN_GROUP_CONFIDENCE || g.filter((w) => w.confidence >= 85 && alnumCount(w.text) >= 2).length >= 2)
+    // un groupe de caractères isolés (« / A », « c ») n'est pas du texte
+    .filter((g) => g.some((w) => alnumCount(w.text) >= 2))
+    .map((g) => {
+      const drop = (w: OcrWord) => w.confidence < MIN_EDGE_CONFIDENCE || STRAY_SYMBOL.test(w.text);
+      let a = 0;
+      let b = g.length - 1;
+      while (a <= b && drop(g[a])) a++;
+      while (b >= a && drop(g[b])) b--;
+      return g.slice(a, b + 1).map((w) => w.text).join(' ');
+    })
+    .filter(Boolean)
+    .join(' ');
+}
+
+/** Reconstruit le texte (paragraphes séparés par une ligne vide) à partir des mots filtrés. */
+export function rebuildText(blocks: OcrBlock[]): string {
+  const paragraphs: string[] = [];
+  for (const block of blocks) {
+    for (const p of block.paragraphs ?? []) {
+      const lines = (p.lines ?? []).map(cleanLine).filter(Boolean);
+      if (lines.length) paragraphs.push(lines.join('\n'));
+    }
+  }
+  return paragraphs.join('\n\n');
 }
 
 /**
